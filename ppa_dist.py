@@ -68,10 +68,8 @@ def compute_ppa(
     proto_info: np.ndarray,
     train_img_ids: np.ndarray,
     part_locs: pd.DataFrame,
-    radius: float,
 ):
     """Compute distances between prototypes and annotated parts."""
-    hits = []
     rows = []
     grouped = part_locs.groupby("image_id")
 
@@ -96,24 +94,18 @@ def compute_ppa(
                 cls=int(proto_cls),
             )
         )
-        hits.append(distance <= radius)
 
     ppa = pd.DataFrame(rows)
-    return ppa, float(np.mean(hits))
+    return ppa
 
 
-def plot_ppa_distribution(
-    df: pd.DataFrame,
-    hit_rate: float,
-    out_dir: Path,
-    bins: int = 40,
-) -> Path:
+def plot_ppa_distribution(df: pd.DataFrame, out_dir: Path) -> Path:
     """Plot histogram of prototype-to-part distances and save the figure."""
     distances = df["distance"].dropna().to_numpy()
     median_distance = float(np.median(distances)) if distances.size else float("nan")
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.hist(distances, bins=bins, color="#4B85F5", alpha=0.85, edgecolor="white")
+    ax.hist(distances, bins="auto", color="#4B85F5", alpha=0.85, edgecolor="white")
 
     if np.isfinite(median_distance):
         ax.axvline(
@@ -126,9 +118,9 @@ def plot_ppa_distribution(
 
     ax.set_xlabel("Prototype-to-part distance (pixels)")
     ax.set_ylabel("Prototypes")
-    ax.set_title(f"PPA distance distribution · hit rate={hit_rate:.3f}")
+    ax.set_title("PPA distance distribution")
 
-    handles, labels = ax.get_legend_handles_labels()
+    handles, _ = ax.get_legend_handles_labels()
     if handles:
         ax.legend()
 
@@ -141,38 +133,61 @@ def plot_ppa_distribution(
     return figure_path
 
 
+def compute_hit_curve(distances: np.ndarray) -> pd.DataFrame:
+    """Compute hit rates across all feasible radius thresholds."""
+    distances = np.sort(distances)
+    if distances.size == 0:
+        return pd.DataFrame({"radius": [0.0], "hit_rate": [np.nan]})
+
+    radii = np.concatenate(([0.0], distances))
+    denominator = distances.size
+    cumulative = np.arange(radii.size, dtype=float)
+    cumulative[0] = 0.0
+    hits = cumulative / denominator
+    curve = pd.DataFrame({"radius": radii, "hit_rate": hits})
+    curve = curve.groupby("radius", as_index=False)["hit_rate"].max()
+    return curve
+
+
+def plot_hit_curve(curve: pd.DataFrame, out_dir: Path) -> Path:
+    """Plot the hit-rate curve derived from the PPA distances."""
+    if curve.empty:
+        raise ValueError("Hit-rate curve is empty; no distances were provided.")
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.step(curve["radius"], curve["hit_rate"], where="post", color="#1CA7C7", linewidth=2)
+    ax.set_xlabel("Radius threshold (pixels)")
+    ax.set_ylabel("Hit rate")
+    ax.set_xlim(0, curve["radius"].max())
+    ax.set_ylim(0, 1.0)
+    ax.set_title("PPA hit rate across radius thresholds")
+    fig.tight_layout()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    figure_path = out_dir / "ppa_hit_curve.png"
+    fig.savefig(figure_path, dpi=200)
+    plt.close(fig)
+    return figure_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate the PPA distance distribution plot for a ProtoPNet checkpoint."
+        description="Compute PPA distances and generate histogram + hit-rate curve."
     )
-    parser.add_argument(
-        "--model",
-        required=True,
-        help="Path to the saved ProtoPNet checkpoint (torch.save output).",
-    )
-    parser.add_argument(
-        "--dataset",
-        required=True,
-        help="Dataset root containing the train split and part_locs.csv.",
-    )
-    parser.add_argument(
-        "--radius",
-        required=True,
-        type=float,
-        help="Radius threshold (in pixels) used for computing the hit rate.",
-    )
-    parser.add_argument(
-        "--output",
-        default="figures",
-        help="Directory where the histogram figure and CSV table are saved.",
-    )
-    parser.add_argument(
-        "--bins",
-        type=int,
-        default=40,
-        help="Number of bins to use for the histogram (default: 40).",
-    )
+    parser.add_argument("model", help="Path to the saved ProtoPNet checkpoint.")
+    parser.add_argument("dataset", help="Dataset root containing train/ and part_locs.csv.")
+    parser.add_argument("output", help="Directory where CSVs and figures will be saved.")
     return parser.parse_args()
+
+
+def summarize_curve(curve: pd.DataFrame) -> dict[str, float]:
+    """Return threshold diagnostics for commonly requested hit rates."""
+    targets = [0.5, 0.7, 0.8, 0.9]
+    summary = {}
+    for target in targets:
+        candidates = curve[curve["hit_rate"] >= target]
+        summary[target] = float(candidates["radius"].iloc[0]) if not candidates.empty else float("nan")
+    return summary
 
 
 def main() -> None:
@@ -183,18 +198,32 @@ def main() -> None:
 
     _, train_img_ids, part_locs = load_part_locations(args.dataset, model.img_size)
     proto_info = load_prototype_info(args.model)
-    ppa_table, hit_rate = compute_ppa(proto_info, train_img_ids, part_locs, args.radius)
+    ppa_table = compute_ppa(proto_info, train_img_ids, part_locs)
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     csv_path = output_dir / "ppa_table.csv"
     ppa_table.to_csv(csv_path, index=False)
-    figure_path = plot_ppa_distribution(ppa_table, hit_rate, output_dir, bins=args.bins)
+    histogram_path = plot_ppa_distribution(ppa_table, output_dir)
+
+    distances = ppa_table["distance"].to_numpy()
+    curve = compute_hit_curve(distances)
+    curve_path = output_dir / "ppa_hit_curve.csv"
+    curve.to_csv(curve_path, index=False)
+    curve_fig_path = plot_hit_curve(curve, output_dir)
+
+    summary = summarize_curve(curve)
 
     print(f"Saved PPA table to {csv_path}")
-    print(f"Saved histogram to {figure_path}")
-    print(f"PPA hit rate (radius={args.radius}): {hit_rate:.3f}")
+    print(f"Saved histogram to {histogram_path}")
+    print(f"Saved hit-rate curve data to {curve_path}")
+    print(f"Saved hit-rate curve plot to {curve_fig_path}")
+    for target, radius in summary.items():
+        if np.isfinite(radius):
+            print(f"radius for hit_rate >= {target:.1f}: {radius:.2f}px")
+        else:
+            print(f"radius for hit_rate >= {target:.1f}: not reached")
 
 
 if __name__ == "__main__":
