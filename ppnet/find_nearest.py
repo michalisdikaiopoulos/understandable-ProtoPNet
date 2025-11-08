@@ -54,12 +54,23 @@ def find_k_nearest_patches_to_prototypes(dataloader,  # pytorch dataloader (must
                                          root_dir_for_saving_images='./nearest',
                                          log=print,
                                          prototype_activation_function_in_numpy=None):
+    # Detect device
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
     # full_save=False will only return the class identity of the closest patches, but it will not save anything.
     prototype_network_parallel.eval()
-    n_prototypes = prototype_network_parallel.module.num_prototypes
-    prototype_shape = prototype_network_parallel.module.prototype_shape
+    model = getattr(prototype_network_parallel, "module", prototype_network_parallel)
+    model.to(device)
+
+    n_prototypes = model.num_prototypes
+    prototype_shape = model.prototype_shape
     max_dist = prototype_shape[1] * prototype_shape[2] * prototype_shape[3]
-    protoL_rf_info = prototype_network_parallel.module.proto_layer_rf_info
+    protoL_rf_info = model.proto_layer_rf_info
     heaps = []
     # allocate an array of n_prototypes number of heaps
     for _ in range(n_prototypes):
@@ -73,8 +84,8 @@ def find_k_nearest_patches_to_prototypes(dataloader,  # pytorch dataloader (must
             search_batch = search_batch_input
 
         with torch.no_grad():
-            search_batch = search_batch.cuda()
-            protoL_input_torch, proto_dist_torch = prototype_network_parallel.module.push_forward(search_batch)
+            search_batch = search_batch.to(device)
+            protoL_input_torch, proto_dist_torch = model.push_forward(search_batch)
 
         proto_dist_ = np.copy(proto_dist_torch.detach().cpu().numpy())
         for img_idx, distance_map in enumerate(proto_dist_):
@@ -101,9 +112,9 @@ def find_k_nearest_patches_to_prototypes(dataloader,  # pytorch dataloader (must
                     original_img = search_batch_input[img_idx].numpy()
                     original_img = np.transpose(original_img, (1, 2, 0))
 
-                    if prototype_network_parallel.module.prototype_activation_function == 'log':
-                        act_pattern = np.log((distance_map[j] + 1)/(distance_map[j] + prototype_network_parallel.module.epsilon))
-                    elif prototype_network_parallel.module.prototype_activation_function == 'linear':
+                    if model.prototype_activation_function == 'log':
+                        act_pattern = np.log((distance_map[j] + 1)/(distance_map[j] + model.epsilon))
+                    elif model.prototype_activation_function == 'linear':
                         act_pattern = max_dist - distance_map[j]
                     else:
                         act_pattern = prototype_activation_function_in_numpy(distance_map[j])

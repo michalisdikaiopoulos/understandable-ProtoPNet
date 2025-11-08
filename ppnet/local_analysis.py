@@ -123,13 +123,17 @@ def _run_analysis_on_image(args: Namespace):
     log(f'Experiment run: {experiment_run}')
     log(f'Output path: {os.path.abspath(save_analysis_path)}\n')
 
-    ppnet = torch.load(args.model)
-    ppnet = ppnet.cuda()
-    ppnet_multi = torch.nn.DataParallel(ppnet)
+    device = torch.device("mps" if torch.backends.mps.is_available() else
+                          "cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    ppnet = torch.load(args.model, map_location=device)
+    ppnet = ppnet.to(device)
+    ppnet_multi = ppnet  # no DataParallel on MPS
 
     img_pil = Image.open(args.img)
-    img_size = ppnet_multi.module.img_size
-    prototype_shape = ppnet.prototype_shape
+    img_size = getattr(ppnet_multi, "img_size", ppnet.img_size)
+    prototype_shape = getattr(ppnet_multi, "prototype_shape", ppnet.prototype_shape)
     max_dist = prototype_shape[1] * prototype_shape[2] * prototype_shape[3]
     normalize = transforms.Normalize(mean=mean, std=std)
     dataset = datasets.ImageFolder(dataset_split_path)
@@ -143,7 +147,7 @@ def _run_analysis_on_image(args: Namespace):
 
     # SANITY CHECK
     # confirm prototype class identity
-    load_img_dir = os.path.join(os.path.dirname(args.model), '..', 'img')
+    load_img_dir = os.path.join(os.path.dirname(args.model), 'img')
     assert os.path.exists(load_img_dir), f'Folder "{load_img_dir}" does not exist'
     prototype_info = np.load(os.path.join(load_img_dir, f'epoch-{start_epoch_number}', 'bb.npy'))
     prototype_img_identity = prototype_info[:, -1]
@@ -166,7 +170,7 @@ def _run_analysis_on_image(args: Namespace):
     img_tensor = preprocess(img_pil)
     img_variable = Variable(img_tensor.unsqueeze(0))
 
-    images_test = img_variable.cuda()
+    images_test = img_variable.to(device)
     labels_test = torch.tensor([ dataset.class_to_idx[img_class] ])
 
     logits, min_distances = ppnet_multi(images_test)

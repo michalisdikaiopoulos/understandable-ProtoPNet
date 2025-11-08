@@ -6,3 +6,5 @@ saved_models
 pretrained_models
 docs
 analysis
+.idea
+checkpoints
